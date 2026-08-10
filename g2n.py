@@ -43,12 +43,35 @@ __all__ = [
     "ReconciliationError",
     "LayoutError",
     "FMCG_TRADE_TERMS",
+    "Attainment",
+    "format_money",
 ]
 
 # Money is compared to the nearest penny. Anything larger than this between the
 # stated closing value and the walked closing value is a real break, not float
 # noise, and reconcile() will raise.
 TOLERANCE = 0.01
+
+
+def format_money(value: float, currency: str = "\u00a3", compact: bool = True) -> str:
+    """Money as a commercial audience reads it: -\u00a31.8m, \u00a3313k, \u00a311.9m.
+
+    Compact by default because a bridge is read for shape and order of
+    magnitude. Full precision stays available on the Bridge properties, and the
+    figures that must be exact - the residual, attainment - are reported
+    separately rather than being inferred off a rounded bar label.
+    """
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if not compact:
+        return f"{sign}{currency}{v:,.0f}"
+    if v >= 1_000_000_000:
+        return f"{sign}{currency}{v / 1_000_000_000:.1f}bn"
+    if v >= 1_000_000:
+        return f"{sign}{currency}{v / 1_000_000:.1f}m"
+    if v >= 1_000:
+        return f"{sign}{currency}{v / 1_000:.0f}k"
+    return f"{sign}{currency}{v:,.0f}"
 
 
 class ReconciliationError(AssertionError):
@@ -86,6 +109,11 @@ class Step:
     kind:      see Kind - governs whether the step enters the summation
     group:     reporting group, used to roll atomic steps up in coarser layouts
     is_residual: marks the balancing step. Exactly one movement must set this.
+    conditional: True where the customer must do something to earn it - hit a
+        volume tier, run the promo, execute the display, pay to terms.
+        Unconditional spend is given away regardless of performance, so the
+        split between the two is the first question worth asking of any
+        trade-terms structure.
     """
 
     code: str
@@ -93,6 +121,7 @@ class Step:
     kind: Kind
     group: str = "Other"
     is_residual: bool = False
+    conditional: bool = False
 
 
 @dataclass
@@ -102,12 +131,25 @@ class Ledger:
     Amounts are signed as they act on the walk: deductions negative, uplifts
     positive. The residual step's amount is not supplied - it is derived, so
     that the bridge closes by construction rather than by hope.
+
+    entitlements: the maximum available for a conditional step - what the
+    customer would have taken at full performance. Supplying it turns the
+    step into a measurable one: attainment is what was earned against what was
+    on the table. Only conditional steps may carry an entitlement, because
+    attainment against money that was never performance-linked is meaningless.
     """
 
     steps: Sequence[Step]
     amounts: Mapping[str, float]
     closing_actual: float
     label: str = "Total"
+    entitlements: Mapping[str, float] = field(default_factory=dict)
+    currency: str = "\u00a3"
+    # Wording for the summary lines under the walk. A gross-to-net bridge
+    # closes on a realisation rate against gross; a period-on-period movement
+    # bridge does not, and printing "net realisation" over it would be wrong.
+    ratio_label: str | None = "Net realisation"
+    basis_label: str = "gross"
 
     def __post_init__(self) -> None:
         codes = [s.code for s in self.steps]
@@ -132,6 +174,19 @@ class Ledger:
         if unknown:
             raise LayoutError(f"amounts given for unknown steps: {', '.join(sorted(unknown))}")
 
+        unknown_ent = set(self.entitlements) - set(codes)
+        if unknown_ent:
+            raise LayoutError(
+                f"entitlements given for unknown steps: {', '.join(sorted(unknown_ent))}"
+            )
+        conditional = {s.code for s in self.steps if s.conditional}
+        misapplied = set(self.entitlements) - conditional
+        if misapplied:
+            raise LayoutError(
+                f"entitlement on unconditional step(s): {', '.join(sorted(misapplied))}. "
+                "Attainment is only meaningful where the spend had to be earned."
+            )
+
     @property
     def opening(self) -> Step:
         return next(s for s in self.steps if s.kind is Kind.OPENING)
@@ -145,6 +200,32 @@ class Ledger:
             return next(s for s in self.steps if s.code == code)
         except StopIteration:
             raise LayoutError(f"unknown step code: {code}") from None
+
+
+@dataclass(frozen=True)
+class Attainment:
+    """What a conditional term actually cost against what was on the table.
+
+    earned:      what the customer took (signed as it acts on the walk)
+    entitlement: the maximum available at full performance
+    share:       earned / entitlement
+    """
+
+    code: str
+    label: str
+    earned: float
+    entitlement: float
+
+    @property
+    def share(self) -> float:
+        if not self.entitlement:
+            return 0.0
+        return self.earned / self.entitlement
+
+    @property
+    def unearned(self) -> float:
+        """Money that was on the table and not taken - retained margin."""
+        return self.entitlement - self.earned
 
 
 @dataclass
@@ -248,6 +329,69 @@ class Bridge:
         if not self.opening_value:
             return 0.0
         return self.residual / self.opening_value
+
+    # ------------------------------------------------- conditionality & attainment
+
+    def _movement_steps(self) -> list[Step]:
+        return [s for s in self.ledger.steps if s.kind.is_summable]
+
+    def conditional_spend(self) -> float:
+        """Deductions the customer had to earn."""
+        return sum(
+            self._amounts.get(s.code, 0.0)
+            for s in self._movement_steps()
+            if s.conditional
+        )
+
+    def unconditional_spend(self) -> float:
+        """Deductions given away regardless of what the customer did.
+
+        The single most useful number in a trade-terms review. Unconditional
+        spend buys no behaviour: it is priced into the customer's expectations
+        and is the hardest money to ever win back.
+        """
+        return sum(
+            self._amounts.get(s.code, 0.0)
+            for s in self._movement_steps()
+            if not s.conditional
+        )
+
+    def unconditional_share(self) -> float:
+        """Unconditional spend as a share of total deductions."""
+        total = self.conditional_spend() + self.unconditional_spend()
+        if not total:
+            return 0.0
+        return self.unconditional_spend() / total
+
+    def attainment(self) -> list[Attainment]:
+        """Earned vs available, for every conditional step with an entitlement.
+
+        Attainment below 100% is not automatically good news. It can mean the
+        customer under-delivered and the margin came back - or that the terms
+        were never achievable and the structure is not driving any behaviour.
+        The number starts the conversation; it does not end it.
+        """
+        out = []
+        for step in self._movement_steps():
+            if step.code not in self.ledger.entitlements:
+                continue
+            out.append(
+                Attainment(
+                    code=step.code,
+                    label=step.label,
+                    earned=self._amounts.get(step.code, 0.0),
+                    entitlement=self.ledger.entitlements[step.code],
+                )
+            )
+        return out
+
+    def overall_attainment(self) -> float:
+        """Weighted attainment across every entitled conditional term."""
+        rows = self.attainment()
+        total_ent = sum(r.entitlement for r in rows)
+        if not total_ent:
+            return 0.0
+        return sum(r.earned for r in rows) / total_ent
 
     def build(self, layout: Layout) -> list[Bar]:
         """Resolve a layout into positioned bars, validating as it goes."""
@@ -353,25 +497,78 @@ class Bridge:
 
     # ---------------------------------------------------------------- output
 
-    def to_text(self, layout: Layout, width: int = 64) -> str:
+    def to_text(self, layout: Layout, width: int = 68) -> str:
         """Plain-text bridge. No dependencies, works in a terminal or a log."""
         bars = self.build(layout)
+        cur = self.ledger.currency
+        m = lambda v: format_money(v, cur)  # noqa: E731
+
         name_w = max(len(b.label) for b in bars) + 2
         lines = [f"{self.ledger.label} - {layout.name}", "-" * width]
 
         for bar in bars:
             value = bar.end if bar.is_endpoint else bar.amount
             marker = "=" if bar.is_endpoint else " "
-            lines.append(f"{marker} {bar.label:<{name_w}} {value:>14,.0f}")
+            lines.append(f"{marker} {bar.label:<{name_w}} {m(value):>12}")
             if not bar.is_endpoint:
-                lines.append(f"  {'':<{name_w}} {bar.end:>14,.0f}  (running)")
+                lines.append(f"  {'':<{name_w}} {m(bar.end):>12}  (running)")
 
         lines.append("-" * width)
+        if self.ledger.ratio_label and self.opening_value:
+            lines.append(
+                f"  {self.ledger.ratio_label:<{name_w}} "
+                f"{self.closing_value / self.opening_value:>11.1%}"
+            )
         lines.append(
-            f"  {'Residual as % of gross':<{name_w}} {self.residual_share():>13.2%}"
+            f"  {'Residual as % of ' + self.ledger.basis_label:<{name_w}} "
+            f"{self.residual_share():>11.2%}"
         )
         for label, amount in self.disclosures(layout):
-            lines.append(f"! {label + ' (disclosed)':<{name_w}} {amount:>14,.0f}")
+            # Disclosed figures are exact, not compact - a rounded residual is
+            # the thing this whole structure exists to prevent.
+            lines.append(
+                f"! {label + ' (disclosed)':<{name_w}} "
+                f"{format_money(amount, cur, compact=False):>11}"
+            )
+        return "\n".join(lines)
+
+    def to_terms_text(self, width: int = 68) -> str:
+        """Conditionality and attainment - the trade-terms quality report.
+
+        Deliberately separate from the walk. The bridge says where the money
+        went; this says whether any of it bought anything.
+        """
+        cur = self.ledger.currency
+        m = lambda v: format_money(v, cur)  # noqa: E731
+        rows = self.attainment()
+
+        lines = [f"{self.ledger.label} - Trade Terms Quality", "-" * width]
+        lines.append(
+            f"  {'Conditional (earned)':<30}{m(self.conditional_spend()):>12}"
+        )
+        lines.append(
+            f"  {'Unconditional (given)':<30}{m(self.unconditional_spend()):>12}"
+        )
+        lines.append(
+            f"  {'Unconditional share of spend':<30}{self.unconditional_share():>12.1%}"
+        )
+
+        if rows:
+            lines.append("-" * width)
+            lines.append(
+                f"  {'Conditional term':<26}{'Earned':>10}{'Available':>11}"
+                f"{'Attained':>10}{'Retained':>10}"
+            )
+            for r in rows:
+                lines.append(
+                    f"  {r.label:<26}{m(r.earned):>10}{m(r.entitlement):>11}"
+                    f"{r.share:>10.1%}{m(r.unearned):>10}"
+                )
+            lines.append("-" * width)
+            lines.append(
+                f"  {'Overall attainment':<26}{'':>10}{'':>11}"
+                f"{self.overall_attainment():>10.1%}"
+            )
         return "\n".join(lines)
 
     # Palette: reference data-viz palette, validated with the six checks on the
@@ -395,10 +592,17 @@ class Bridge:
         path: str,
         title: str | None = None,
         subtitle: str | None = None,
+        illustrative: bool = False,
     ) -> str:
         """Render the walk as a waterfall. Requires matplotlib.
 
         Imported lazily so the core module stays dependency-free.
+
+        illustrative: stamp the chart as example data. Set it for anything
+        published outside the business - a demo, a README, a teaching example.
+        A waterfall carrying plausible-looking money is exactly the kind of
+        image that gets screenshotted and later mistaken for real trading
+        figures, so the marker is on the artwork itself, not just the caption.
         """
         try:
             import matplotlib
@@ -414,6 +618,8 @@ class Bridge:
 
         bars = self.build(layout)
         residual_code = self.ledger.residual.code
+        cur = self.ledger.currency
+        m = lambda v: format_money(v, cur)  # noqa: E731
 
         fig, ax = plt.subplots(figsize=(max(8.0, len(bars) * 1.15), 4.6))
         fig.patch.set_facecolor(self.SURFACE)
@@ -435,7 +641,7 @@ class Bridge:
             if bar.is_endpoint:
                 ax.bar(i, bar.end, color=colour, width=0.58, zorder=3)
                 label_y, va = bar.end + pad * 0.35, "bottom"
-                text = f"{bar.end:,.0f}"
+                text = m(bar.end)
             else:
                 ax.bar(
                     i,
@@ -451,7 +657,7 @@ class Bridge:
                     label_y, va = min(bar.start, bar.end) - pad * 0.35, "top"
                 else:
                     label_y, va = max(bar.start, bar.end) + pad * 0.35, "bottom"
-                text = f"{bar.amount:+,.0f}"
+                text = ("+" if bar.amount > 0 else "") + m(bar.amount)
 
             ax.text(
                 i,
@@ -478,7 +684,7 @@ class Bridge:
         ax.set_xticklabels(
             [b.label for b in bars], rotation=22, ha="right", fontsize=8.5
         )
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: m(v)))
         ax.tick_params(colors=self.INK_MUTED, labelsize=8.5, length=0)
         for lbl in ax.get_xticklabels():
             lbl.set_color(self.INK)
@@ -524,11 +730,36 @@ class Bridge:
             pad=28,
         )
 
+        if illustrative:
+            # Sits behind the bars (zorder 1) so it cannot be cropped out of a
+            # screenshot of the plot area without the bars going with it.
+            ax.text(
+                0.5,
+                0.5,
+                "ILLUSTRATIVE DATA",
+                transform=ax.transAxes,
+                fontsize=34,
+                color=self.INK_MUTED,
+                alpha=0.16,
+                ha="center",
+                va="center",
+                rotation=24,
+                zorder=1,
+                fontweight="bold",
+            )
+
+        ratio = ""
+        if self.ledger.ratio_label and self.opening_value:
+            ratio = (
+                f"   |   {self.ledger.ratio_label} "
+                f"{self.closing_value / self.opening_value:.1%}"
+            )
         note = subtitle or (
-            f"Residual {self.residual:,.0f} "
-            f"({self.residual_share():.2%} of gross)   |   "
-            f"Net realisation {self.closing_value / self.opening_value:.1%}"
+            f"Residual {format_money(self.residual, cur, compact=False)} "
+            f"({self.residual_share():.2%} of {self.ledger.basis_label}){ratio}"
         )
+        if illustrative:
+            note = "Illustrative example data - not actual trading figures.   |   " + note
         fig.text(0.012, 0.015, note, fontsize=8, color=self.INK_MUTED)
 
         fig.tight_layout(rect=(0, 0.035, 1, 1))
@@ -548,15 +779,19 @@ class Bridge:
 FMCG_TRADE_TERMS: tuple[Step, ...] = (
     Step("GROSS_SALES", "Gross Sales", Kind.OPENING, "Gross"),
     # On-invoice: visible to the customer on the invoice itself.
+    # Listing money is paid for presence on shelf, not for performance - the
+    # textbook unconditional term, and usually the hardest to claw back.
     Step("LISTING", "Listing Discount", Kind.MOVEMENT, "On-invoice"),
-    Step("VOLUME_REBATE", "Volume Rebate", Kind.MOVEMENT, "On-invoice"),
+    Step("VOLUME_REBATE", "Volume Rebate", Kind.MOVEMENT, "On-invoice", conditional=True),
     Step("LOGISTICS", "Logistics Allowance", Kind.MOVEMENT, "On-invoice"),
-    Step("PROMPT_PAY", "Prompt Payment Discount", Kind.MOVEMENT, "On-invoice"),
+    Step("PROMPT_PAY", "Prompt Payment Discount", Kind.MOVEMENT, "On-invoice", conditional=True),
     Step("INVOICED_SALES", "Invoiced Sales", Kind.POSITION, "Subtotal"),
     # Off-invoice: settled retrospectively, and where bridges usually go wrong.
-    Step("TPR", "Temporary Price Reduction", Kind.MOVEMENT, "Off-invoice"),
-    Step("FEATURE_DISPLAY", "Feature & Display", Kind.MOVEMENT, "Off-invoice"),
-    Step("OVERRIDER", "Annual Overrider", Kind.MOVEMENT, "Off-invoice"),
+    Step("TPR", "Temporary Price Reduction", Kind.MOVEMENT, "Off-invoice", conditional=True),
+    Step("FEATURE_DISPLAY", "Feature & Display", Kind.MOVEMENT, "Off-invoice", conditional=True),
+    Step("OVERRIDER", "Annual Overrider", Kind.MOVEMENT, "Off-invoice", conditional=True),
+    # Markdown, returns and the residual are consequences, not agreements -
+    # nothing was bought with them, so they are never conditional.
     Step("MARKDOWN", "Markdown & Distress", Kind.MOVEMENT, "Off-invoice"),
     Step("RETURNS", "Returns & Claims", Kind.MOVEMENT, "Off-invoice"),
     Step("OTHER_ADJ", "Other Adjustments", Kind.MOVEMENT, "Off-invoice", is_residual=True),
@@ -622,6 +857,8 @@ def bridge_from_rows(
     opening_field: str = "GROSS_SALES",
     closing_field: str = "net_sales",
     label: str = "Total",
+    entitlements: Mapping[str, float] | None = None,
+    currency: str = "\u00a3",
 ) -> Bridge:
     """Aggregate transaction rows into a bridge.
 
@@ -642,5 +879,12 @@ def bridge_from_rows(
         closing += float(row.get(closing_field, 0.0))
 
     return Bridge(
-        Ledger(steps=steps, amounts=totals, closing_actual=closing, label=label)
+        Ledger(
+            steps=steps,
+            amounts=totals,
+            closing_actual=closing,
+            label=label,
+            entitlements=dict(entitlements or {}),
+            currency=currency,
+        )
     )

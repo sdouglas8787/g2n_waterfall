@@ -1,11 +1,16 @@
 """
-Worked example: a gross-to-net bridge for an ambient grocery supplier.
+Worked example: an ambient grocery supplier, branded and own-label.
 
-The figures are illustrative and invented - the point is the mechanics, not the
-numbers. Note that the rows deliberately do not explain the whole deduction:
-the actual net settled is lower than the listed deductions imply, so the bridge
-derives a residual and reports it rather than absorbing it. That is the normal
-state of real trade-spend data, not an edge case.
+ALL FIGURES ARE ILLUSTRATIVE AND INVENTED. They are not any real company's
+trading, and they are shaped to exercise the mechanics rather than to look
+plausible. Charts written by this script are stamped as example data.
+
+Two things are deliberately not tidy, because real data is not tidy:
+
+  * the deductions do not fully explain the settled net, so the G2N bridge
+    derives a residual and reports it rather than absorbing it;
+  * the range changes between years, so the PVM bridge has new and delisted
+    lines to separate out before price and volume mean anything.
 
     python demo.py
     python demo.py --chart      # also writes PNGs (needs matplotlib)
@@ -17,7 +22,9 @@ import argparse
 from pathlib import Path
 
 from g2n import bridge_from_rows, fmcg_layouts
+from pvm import PeriodRow, growth_summary, price_growth, pvm_bridge, pvm_layout
 
+# ---------------------------------------------------------------- gross to net
 # One row per customer x category. Deductions are negative, gross is positive.
 # `net_sales` is what actually settled - taken from the ledger, not recomputed
 # from the deductions, which is what allows the residual to be visible at all.
@@ -84,58 +91,115 @@ ROWS = [
     },
 ]
 
+# What the customers could have taken at full performance, per the agreements.
+# Only conditional terms may carry an entitlement - attainment against money
+# that was never performance-linked would be meaningless, and the Ledger
+# refuses it.
+ENTITLEMENTS = {
+    "VOLUME_REBATE": -1_020_000,   # all tiers achieved
+    "PROMPT_PAY": -199_000,        # every invoice paid to terms
+    "TPR": -1_320_000,             # full promotional plan executed
+    "FEATURE_DISPLAY": -390_000,   # every agreed display delivered
+    "OVERRIDER": -368_100,         # annual target hit in full
+}
+
+# ------------------------------------------------------- price / volume / mix
+# Product-level trading, two years. The range is not identical between them:
+# one line is new, one has been delisted.
+LAST_YEAR = [
+    PeriodRow("Soup Favourites 400g", 1_200_000, 1.10),
+    PeriodRow("Soup Vegetarian 400g", 540_000, 1.15),
+    PeriodRow("Beetroot 340g", 400_000, 1.35),
+    PeriodRow("Chutney 290g", 250_000, 2.10),
+    PeriodRow("Pie 425g", 600_000, 1.80),
+]
+THIS_YEAR = [
+    PeriodRow("Soup Favourites 400g", 1_140_000, 1.19),
+    PeriodRow("Soup Vegetarian 400g", 560_000, 1.22),
+    PeriodRow("Beetroot 340g", 455_000, 1.42),
+    PeriodRow("Chutney 290g", 268_000, 2.28),
+    PeriodRow("Soup Luxury 400g", 210_000, 1.85),
+]
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chart", action="store_true", help="write waterfall PNGs")
     args = parser.parse_args()
 
+    print("=" * 68)
+    print("  ILLUSTRATIVE EXAMPLE DATA - not actual trading figures")
+    print("=" * 68)
+    print()
+
     layouts = fmcg_layouts()
 
-    # ---- One bridge for the whole business, three ways of showing it --------
-    total = bridge_from_rows(ROWS, label="Total Business FY26")
+    # ---- 1. Gross to net: one bridge, three ways of showing it -------------
+    total = bridge_from_rows(ROWS, label="Total Business FY26", entitlements=ENTITLEMENTS)
 
     for key in ("executive", "trade_terms", "diagnostic"):
         print(total.to_text(layouts[key]))
         print()
 
-    if args.chart:
-        # docs/ is the one PNG path .gitignore keeps, so the images committed to
-        # the repo are exactly what this demo produces - they cannot drift.
-        Path("docs").mkdir(exist_ok=True)
-        for key in ("executive", "diagnostic"):
-            path = total.to_chart(layouts[key], f"docs/bridge_{key}.png")
-            print(f"wrote {path}")
-        print()
+    # ---- 2. Was any of that spend actually earned? -------------------------
+    print(total.to_terms_text())
+    print()
 
-    # ---- The same ledger, sliced by customer -------------------------------
-    # Net-to-gross realisation per customer is the number this whole structure
-    # exists to produce: it is what says which accounts are actually paying for
-    # the investment they receive.
+    # ---- 3. Why net revenue moved year on year -----------------------------
+    movement = pvm_bridge(LAST_YEAR, THIS_YEAR, label="Net Revenue FY26 vs FY25")
+    print(movement.to_text(pvm_layout()))
+    print()
+    print(growth_summary(movement))
+    print()
+    print(f"  Realised price growth: {price_growth(movement):+.1%}")
+    print()
+
+    # ---- 4. The same G2N ledger, sliced by customer ------------------------
+    # Net realisation is what the structure exists to produce: it says which
+    # accounts are actually paying for the investment they receive.
     print("Net realisation by customer")
-    print("-" * 64)
+    print("-" * 68)
     print(f"  {'Customer':<24}{'Gross':>12}{'Net':>12}{'Realised':>10}{'Resid':>8}")
 
     for row in ROWS:
         bridge = bridge_from_rows([row], label=row["customer"])
         bridge.reconcile()
-        realisation = bridge.closing_value / bridge.opening_value
         print(
             f"  {row['customer']:<24}"
-            f"{bridge.opening_value:>12,.0f}"
-            f"{bridge.closing_value:>12,.0f}"
-            f"{realisation:>10.1%}"
+            f"{bridge.opening_value / 1e6:>11,.1f}m"
+            f"{bridge.closing_value / 1e6:>11,.1f}m"
+            f"{bridge.closing_value / bridge.opening_value:>10.1%}"
             f"{bridge.residual_share():>8.1%}"
         )
 
-    print("-" * 64)
+    print("-" * 68)
     print(
         f"  {'Total':<24}"
-        f"{total.opening_value:>12,.0f}"
-        f"{total.closing_value:>12,.0f}"
+        f"{total.opening_value / 1e6:>11,.1f}m"
+        f"{total.closing_value / 1e6:>11,.1f}m"
         f"{total.closing_value / total.opening_value:>10.1%}"
         f"{total.residual_share():>8.1%}"
     )
+    print()
+
+    if args.chart:
+        # docs/ is the one PNG path .gitignore keeps, so the images committed to
+        # the repo are exactly what this demo produces - they cannot drift.
+        # illustrative=True stamps every one of them.
+        Path("docs").mkdir(exist_ok=True)
+        for key in ("executive", "diagnostic"):
+            print(
+                "wrote "
+                + total.to_chart(
+                    layouts[key], f"docs/bridge_{key}.png", illustrative=True
+                )
+            )
+        print(
+            "wrote "
+            + movement.to_chart(
+                pvm_layout(), "docs/bridge_pvm.png", illustrative=True
+            )
+        )
 
 
 if __name__ == "__main__":

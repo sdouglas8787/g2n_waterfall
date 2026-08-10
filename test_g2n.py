@@ -14,6 +14,7 @@ import pytest
 
 from g2n import (
     FMCG_TRADE_TERMS,
+    format_money,
     Bridge,
     Kind,
     Layout,
@@ -223,3 +224,86 @@ def test_reconciliation_error_when_closing_is_inconsistent():
     bridge._amounts["RESID"] = 50.0  # simulate a supplied, wrong residual
     with pytest.raises(ReconciliationError, match="break"):
         bridge.reconcile()
+
+
+# ------------------------------------------- conditionality & attainment
+
+ENTITLEMENTS = {"VOLUME_REBATE": -60_000, "TPR": -150_000, "FEATURE_DISPLAY": -40_000}
+
+
+def entitled_bridge():
+    return bridge_from_rows([ROW], label="Test", entitlements=ENTITLEMENTS)
+
+
+def test_conditional_and_unconditional_split_the_whole_deduction():
+    b = entitled_bridge()
+    movements = sum(
+        b.amount(s.code) for s in FMCG_TRADE_TERMS if s.kind is Kind.MOVEMENT
+    )
+    assert b.conditional_spend() + b.unconditional_spend() == pytest.approx(movements)
+
+
+def test_unconditional_share_counts_only_terms_nobody_had_to_earn():
+    b = entitled_bridge()
+    # Listing, logistics, markdown, returns and the residual are unconditional.
+    expected = -30_000 - 20_000 - 8_000 - 5_000 + b.residual
+    assert b.unconditional_spend() == pytest.approx(expected)
+    assert 0 < b.unconditional_share() < 1
+
+
+def test_attainment_is_earned_over_available():
+    b = entitled_bridge()
+    rows = {a.code: a for a in b.attainment()}
+    assert rows["VOLUME_REBATE"].share == pytest.approx(50_000 / 60_000)
+    assert rows["TPR"].share == pytest.approx(120_000 / 150_000)
+    # Money left on the table is retained margin, signed like the deduction.
+    assert rows["VOLUME_REBATE"].unearned == pytest.approx(-10_000)
+
+
+def test_overall_attainment_weights_by_entitlement():
+    b = entitled_bridge()
+    earned, available = -(50_000 + 120_000 + 40_000), -(60_000 + 150_000 + 40_000)
+    assert b.overall_attainment() == pytest.approx(earned / available)
+
+
+def test_only_entitled_steps_appear_in_attainment():
+    b = entitled_bridge()
+    assert {a.code for a in b.attainment()} == set(ENTITLEMENTS)
+
+
+def test_entitlement_on_an_unconditional_step_is_refused():
+    """Attainment against money nobody had to earn is meaningless."""
+    with pytest.raises(LayoutError, match="unconditional step"):
+        bridge_from_rows([ROW], entitlements={"LISTING": -30_000})
+
+
+def test_entitlement_on_unknown_step_is_refused():
+    with pytest.raises(LayoutError, match="unknown steps"):
+        bridge_from_rows([ROW], entitlements={"NOPE": -1.0})
+
+
+# ------------------------------------------------------- money formatting
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (11_918_000, "£11.9m"),
+        (-1_762_000, "-£1.8m"),
+        (-96_140, "-£96k"),
+        (313_000, "£313k"),
+        (842, "£842"),
+        (0, "£0"),
+        (-2_400_000_000, "-£2.4bn"),
+    ],
+)
+def test_compact_money(value, expected):
+    assert format_money(value) == expected
+
+
+def test_exact_money_keeps_every_digit():
+    assert format_money(-96_140, compact=False) == "-£96,140"
+
+
+def test_currency_is_configurable():
+    assert format_money(1_500_000, currency="$") == "$1.5m"
