@@ -1,5 +1,5 @@
 """
-Price / Volume / Mix: why net revenue moved between two periods.
+PVM (price, volume, mix): why net revenue moved between two periods.
 
 The gross-to-net bridge in `g2n.py` explains where the money went *within* one
 period. PVM is the other half of the question and the other bridge every
@@ -84,7 +84,7 @@ PVM_DRIVERS: tuple[Step, ...] = (
 )
 
 
-def pvm_layout(name: str = "Price / Volume / Mix") -> Layout:
+def pvm_layout(name: str = "PVM") -> Layout:
     """One bar per driver. PVM is short enough that combining bars hides more
     than it helps, so there is a single layout rather than an exec cut."""
     return Layout(

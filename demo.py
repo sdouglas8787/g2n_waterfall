@@ -103,7 +103,7 @@ ENTITLEMENTS = {
     "OVERRIDER": -368_100,         # annual target hit in full
 }
 
-# ------------------------------------------------------- price / volume / mix
+# ------------------------------------------------------------------- PVM
 # Product-level trading, two years. The range is not identical between them:
 # one line is new, one has been delisted.
 LAST_YEAR = [

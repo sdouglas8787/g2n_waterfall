@@ -1,5 +1,5 @@
 """
-Tests for the price / volume / mix decomposition.
+Tests for the PVM (price, volume, mix) decomposition.
 
 The central property is that the drivers are *exact* — price, volume, mix, new
 and lost sum to the change in net revenue with nothing left over. A PVM bridge
@@ -91,7 +91,7 @@ def test_new_and_delisted_lines_are_separated_out():
     d = decompose(ly, ty)
     assert d["NEW"] == pytest.approx(180.0)
     assert d["LOST"] == pytest.approx(-200.0)
-    # The surviving line did not move, so no price/volume/mix effect at all.
+    # The surviving line did not move, so no PVM effect at all.
     assert d["PRICE"] == pytest.approx(0.0)
     assert d["VOLUME"] == pytest.approx(0.0)
     assert d["MIX"] == pytest.approx(0.0)

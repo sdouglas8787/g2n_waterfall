@@ -1,11 +1,11 @@
-# Commercial Bridges: Gross-to-Net and Price/Volume/Mix
+# Commercial Bridges: Gross-to-Net and PVM
 
 Two Python modules for building the bridges commercial finance runs on — and building
 them so they reconcile by construction rather than by hope.
 
 - **`g2n.py`** — gross sales to net sales, through trade terms and promotional
   investment. Where the money went *within* a period.
-- **`pvm.py`** — last year's net to this year's net, split into price, volume and mix.
+- **`pvm.py`** — last year's net to this year's net, split into price, volume and mix (PVM).
   *Why* it moved between periods.
 
 Both are the same engine: an atomic step ledger, typed movements, a derived residual, and
@@ -137,7 +137,7 @@ investment they receive:
 
 ---
 
-## Price / volume / mix
+## PVM: price, volume, mix
 
 ![Price volume mix waterfall](docs/bridge_pvm.png)
 
