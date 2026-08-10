@@ -14,6 +14,7 @@ state of real trade-spend data, not an edge case.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from g2n import bridge_from_rows, fmcg_layouts
 
@@ -99,8 +100,11 @@ def main() -> None:
         print()
 
     if args.chart:
+        # docs/ is the one PNG path .gitignore keeps, so the images committed to
+        # the repo are exactly what this demo produces - they cannot drift.
+        Path("docs").mkdir(exist_ok=True)
         for key in ("executive", "diagnostic"):
-            path = total.to_chart(layouts[key], f"bridge_{key}.png")
+            path = total.to_chart(layouts[key], f"docs/bridge_{key}.png")
             print(f"wrote {path}")
         print()
 

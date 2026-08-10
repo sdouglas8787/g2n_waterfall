@@ -374,13 +374,38 @@ class Bridge:
             lines.append(f"! {label + ' (disclosed)':<{name_w}} {amount:>14,.0f}")
         return "\n".join(lines)
 
-    def to_chart(self, layout: Layout, path: str, title: str | None = None) -> str:
-        """Waterfall chart. Requires matplotlib; imported only when called."""
+    # Palette: reference data-viz palette, validated with the six checks on the
+    # light surface (#fcfcfb), all pairs. Red vs green measures CVD dE 7.2, in
+    # the 6-8 band that is permitted only with secondary encoding - here sign is
+    # carried three ways over and above hue: deduction bars point down, uplift
+    # bars point up, and every bar is direct-labelled with a signed value.
+    SURFACE = "#fcfcfb"
+    C_ENDPOINT = "#2a78d6"   # slot 1 blue  - opening and closing positions
+    C_DEDUCTION = "#e34948"  # slot 8 red   - reduces net
+    C_UPLIFT = "#008300"     # slot 6 green - increases net
+    C_RESIDUAL = "#eda100"   # slot 4 yellow - the unexplained gap, never hidden
+    INK = "#0b0b0b"
+    INK_MUTED = "#898781"
+    GRID = "#e1e0d9"
+    CONNECTOR = "#c3c2b7"
+
+    def to_chart(
+        self,
+        layout: Layout,
+        path: str,
+        title: str | None = None,
+        subtitle: str | None = None,
+    ) -> str:
+        """Render the walk as a waterfall. Requires matplotlib.
+
+        Imported lazily so the core module stays dependency-free.
+        """
         try:
             import matplotlib
 
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+            from matplotlib.patches import Patch
             from matplotlib.ticker import FuncFormatter
         except ImportError as exc:  # pragma: no cover - environment dependent
             raise ImportError(
@@ -388,53 +413,126 @@ class Bridge:
             ) from exc
 
         bars = self.build(layout)
-        fig, ax = plt.subplots(figsize=(max(8, len(bars) * 1.4), 6))
+        residual_code = self.ledger.residual.code
 
-        endpoint_c, deduction_c, uplift_c = "#1F4E79", "#C0392B", "#1E8449"
+        fig, ax = plt.subplots(figsize=(max(8.0, len(bars) * 1.15), 4.6))
+        fig.patch.set_facecolor(self.SURFACE)
+        ax.set_facecolor(self.SURFACE)
+
+        def colour_for(bar: Bar) -> str:
+            if bar.is_endpoint:
+                return self.C_ENDPOINT
+            if bar.codes == (residual_code,):
+                return self.C_RESIDUAL
+            return self.C_UPLIFT if bar.amount >= 0 else self.C_DEDUCTION
+
+        # Headroom is set from the tallest bar so labels never reach the title.
+        peak = max(max(b.start, b.end) for b in bars)
+        pad = peak * 0.045
 
         for i, bar in enumerate(bars):
+            colour = colour_for(bar)
             if bar.is_endpoint:
-                ax.bar(i, bar.end, color=endpoint_c, width=0.62)
-                top = bar.end
+                ax.bar(i, bar.end, color=colour, width=0.58, zorder=3)
+                label_y, va = bar.end + pad * 0.35, "bottom"
+                text = f"{bar.end:,.0f}"
             else:
-                colour = uplift_c if bar.amount >= 0 else deduction_c
                 ax.bar(
                     i,
                     bar.amount,
                     bottom=bar.start,
                     color=colour,
-                    width=0.62,
+                    width=0.58,
+                    zorder=3,
                 )
-                top = max(bar.start, bar.end)
-                ax.plot(
-                    [i - 0.31, i + 0.31],
-                    [bar.end, bar.end],
-                    color="#555555",
-                    linewidth=0.8,
-                )
+                # A deduction hangs below its start, so its label sits under the
+                # bar; an uplift labels above. Neither can collide with the title.
+                if bar.amount < 0:
+                    label_y, va = min(bar.start, bar.end) - pad * 0.35, "top"
+                else:
+                    label_y, va = max(bar.start, bar.end) + pad * 0.35, "bottom"
+                text = f"{bar.amount:+,.0f}"
+
             ax.text(
                 i,
-                top + abs(self.opening_value) * 0.015,
-                f"{bar.end if bar.is_endpoint else bar.amount:,.0f}",
+                label_y,
+                text,
                 ha="center",
-                va="bottom",
-                fontsize=9,
+                va=va,
+                fontsize=8.5,
+                color=self.INK,
+                zorder=4,
             )
 
+            # Connector from this bar's closing level to the next bar's start.
+            if i < len(bars) - 1 and not bars[i + 1].is_endpoint:
+                ax.plot(
+                    [i + 0.29, i + 1 - 0.29],
+                    [bar.end, bar.end],
+                    color=self.CONNECTOR,
+                    linewidth=1.0,
+                    zorder=2,
+                )
+
         ax.set_xticks(range(len(bars)))
-        ax.set_xticklabels([b.label for b in bars], rotation=30, ha="right", fontsize=9)
+        ax.set_xticklabels(
+            [b.label for b in bars], rotation=22, ha="right", fontsize=8.5
+        )
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        ax.set_title(title or f"{self.ledger.label} - {layout.name}", fontsize=13)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.grid(axis="y", alpha=0.25)
+        ax.tick_params(colors=self.INK_MUTED, labelsize=8.5, length=0)
+        for lbl in ax.get_xticklabels():
+            lbl.set_color(self.INK)
 
-        note = f"Residual {self.residual:,.0f} ({self.residual_share():.2%} of gross)"
-        for label, amount in self.disclosures(layout):
-            note += f"   |   {label} {amount:,.0f}"
-        fig.text(0.01, 0.01, note, fontsize=8, color="#444444")
+        ax.set_ylim(0, peak + pad * 3)
+        ax.grid(axis="y", color=self.GRID, linewidth=0.8, zorder=0)
+        ax.set_axisbelow(True)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(self.CONNECTOR)
 
-        fig.tight_layout()
-        fig.savefig(path, dpi=150)
+        # Identity is never colour-alone: a legend is always present.
+        legend_roles = [
+            (self.C_ENDPOINT, "Opening / closing"),
+            (self.C_DEDUCTION, "Deduction"),
+        ]
+        if any(
+            (not b.is_endpoint) and b.amount >= 0 and b.codes != (residual_code,)
+            for b in bars
+        ):
+            legend_roles.append((self.C_UPLIFT, "Uplift"))
+        if any(b.codes == (residual_code,) for b in bars):
+            legend_roles.append((self.C_RESIDUAL, "Unexplained residual"))
+
+        ax.legend(
+            handles=[Patch(facecolor=c, label=t) for c, t in legend_roles],
+            loc="lower left",
+            bbox_to_anchor=(0.0, 1.005),
+            ncol=len(legend_roles),
+            frameon=False,
+            fontsize=8.5,
+            labelcolor=self.INK,
+            handlelength=1.1,
+            handleheight=1.1,
+            columnspacing=1.4,
+        )
+
+        ax.set_title(
+            title or f"{self.ledger.label} \u2013 {layout.name}",
+            fontsize=12.5,
+            color=self.INK,
+            loc="left",
+            pad=28,
+        )
+
+        note = subtitle or (
+            f"Residual {self.residual:,.0f} "
+            f"({self.residual_share():.2%} of gross)   |   "
+            f"Net realisation {self.closing_value / self.opening_value:.1%}"
+        )
+        fig.text(0.012, 0.015, note, fontsize=8, color=self.INK_MUTED)
+
+        fig.tight_layout(rect=(0, 0.035, 1, 1))
+        fig.savefig(path, dpi=160, facecolor=self.SURFACE)
         plt.close(fig)
         return path
 
