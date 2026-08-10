@@ -7,7 +7,9 @@ investment and other deductions. It is one of the most common artefacts in comme
 finance and one of the most commonly wrong. This module encodes three disciplines that
 stop it going wrong.
 
-The core has **no third-party dependencies**. Charting and Excel export are optional.
+The core has **no third-party dependencies**. Charting is optional.
+
+![Executive gross-to-net waterfall](docs/bridge_executive.png)
 
 ---
 
@@ -62,7 +64,14 @@ Total Business FY26 - Executive
 ! Other Adjustments (disclosed)        -96,140
 ```
 
-The same ledger, sliced by customer. Net realisation is what the structure exists to
+The same ledger under the diagnostic layout — every movement as its own bar, the residual
+called out in its own colour. Note it closes on the same 11,918,000 as the executive view
+above. That is enforced, not coincidence: a layout that drops a movement raises rather
+than rendering a flattering net.
+
+![Diagnostic gross-to-net waterfall](docs/bridge_diagnostic.png)
+
+The same ledger again, sliced by customer. Net realisation is what the structure exists to
 produce — it says which accounts are actually paying for the investment they receive:
 
 ```
@@ -123,6 +132,13 @@ python -m pytest test_g2n.py   # 15 tests
 The tests are not coverage tests. Each one pins a specific way a bridge goes wrong in
 practice: a subtotal added as a movement, a deduction dropped from one audience's view,
 a residual quietly absorbed, a step counted twice.
+
+Chart colours are the reference data-viz palette, checked with the computable
+accessibility gates (OKLCH lightness band, chroma floor, colourblind separation under
+simulated protanopia/deuteranopia, and contrast against the chart surface) rather than
+chosen by eye. Red and green sit in the band that requires secondary encoding, so sign is
+carried three ways beyond hue: deduction bars point down, uplift bars point up, and every
+bar is direct-labelled with a signed value.
 
 ---
 
